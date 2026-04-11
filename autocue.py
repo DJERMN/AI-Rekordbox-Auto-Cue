@@ -537,8 +537,12 @@ _HOT_CUE_LABELS_B = {'Up', 'Down', 'Verse 1', 'Verse 2', 'Verse 3',
 _HOT_CUE_LABELS_C = {'Chorus', 'Up'}
 _HOT_CUE_LABELS_D = {'Outro'}
 
-# Hot cue color table indices (Rekordbox native colors)
-_HOT_CUE_COLOR = {1: 36, 2: 22, 3: 22, 4: 22}  # A=green, B/C/D=orange
+# ANLZ hot_cue slot → master.db Kind mapping
+# Rekordbox uses Kind=5 for D (Kind=4 is reserved, not a standard hot cue)
+_SLOT_TO_KIND = {1: 1, 2: 2, 3: 3, 4: 5}
+
+# master.db Kind → ColorTableIndex
+_HOT_CUE_COLOR = {1: 36, 2: 22, 3: 22, 5: 22}  # A=green, B/C/D=orange
 
 
 def select_hot_cues(cues: list[dict]) -> list[dict]:
@@ -794,7 +798,8 @@ def write_hot_cues_masterdb(file_path: str, hot_cues: list[dict]) -> bool:
     ).delete()
 
     for c in hot_cues:
-        slot = c['hot_cue']          # 1/2/3/4
+        slot = c['hot_cue']                      # ANLZ slot 1/2/3/4
+        kind = _SLOT_TO_KIND.get(slot, slot)     # master.db Kind (D=5, not 4)
         in_msec = c['ms']
         in_frame = round(in_msec * 150 / 1000)
         cue = DjmdCue(
@@ -808,9 +813,9 @@ def write_hot_cues_masterdb(file_path: str, hot_cues: list[dict]) -> bool:
             OutFrame         = 0,
             OutMpegFrame     = 0,
             OutMpegAbs       = 0,
-            Kind             = slot,
+            Kind             = kind,
             Color            = 255,
-            ColorTableIndex  = _HOT_CUE_COLOR.get(slot, 22),
+            ColorTableIndex  = _HOT_CUE_COLOR.get(kind, 22),
             ActiveLoop       = 0,
             Comment          = c.get('label', ''),
             BeatLoopSize     = 0,
