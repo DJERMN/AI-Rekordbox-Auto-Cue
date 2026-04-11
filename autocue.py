@@ -552,11 +552,14 @@ def write_cues_anlz(anlz_path: Path, cues: list[dict]) -> None:
 # 5b. HOT CUE WRITING (A/B/C/D)
 # ══════════════════════════════════════════════════════════════════════════════
 
-# Slot assignment: A=Intro, B=build (last phrase before chorus), C=Chorus, D=Outro
+# Slot assignment: A=Intro, B=build (last phrase before chorus), C=Chorus/Drop, D=Outro
+# B = "Up" = tension/buildup before the drop; Verse/Bridge for non-EDM tracks
+# C = "Chorus" only = the hard beat / actual drop (NOT "Up" which is the build)
+# "Down" is excluded from B: it means energy decreasing, not a buildup
 _HOT_CUE_LABELS_A = {'Intro'}
-_HOT_CUE_LABELS_B = {'Up', 'Down', 'Verse 1', 'Verse 2', 'Verse 3',
-                      'Verse 4', 'Verse 5', 'Verse 6', 'Verse'}
-_HOT_CUE_LABELS_C = {'Chorus', 'Up'}
+_HOT_CUE_LABELS_B = {'Up', 'Verse 1', 'Verse 2', 'Verse 3',
+                      'Verse 4', 'Verse 5', 'Verse 6', 'Verse', 'Bridge'}
+_HOT_CUE_LABELS_C = {'Chorus'}
 _HOT_CUE_LABELS_D = {'Outro'}
 
 # ANLZ hot_cue slot → master.db Kind mapping
@@ -1030,7 +1033,7 @@ def has_cues_masterdb(file_path: str) -> bool:
 # 7. CLI ENTRY POINT
 # ══════════════════════════════════════════════════════════════════════════════
 
-def cmd_single(query: str, dry_run: bool = False):
+def cmd_single(query: str, dry_run: bool = False, force: bool = False):
     tracks = find_tracks_pdb(query)
     if not tracks:
         print(f"No track found for: \"{query}\"")
@@ -1041,7 +1044,7 @@ def cmd_single(query: str, dry_run: bool = False):
             print(f"  [{t['id']:5}] {t['artist']} – {t['title']}")
         print("\nPlease refine the query or use --id <ID>.")
         sys.exit(1)
-    process_track(tracks[0], dry_run=dry_run)
+    process_track(tracks[0], dry_run=dry_run, force=force)
 
 
 def cmd_by_id(track_id: int, dry_run: bool = False):
@@ -1321,7 +1324,7 @@ def main():
         print(__doc__)
         sys.exit(0)
 
-    cmd_single(query, dry_run=dry_run)
+    cmd_single(query, dry_run=dry_run, force=force)
 
 
 if __name__ == '__main__':
