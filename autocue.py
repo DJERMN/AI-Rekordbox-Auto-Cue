@@ -482,14 +482,21 @@ def _build_pco2(cues: list[dict]) -> bytes:
 
 def _rewrite_anlz(path: Path, cues: list[dict], new_section_tag: bytes, build_fn) -> None:
     """
-    Generic ANLZ rewrite: replace sections with count>0 by new ones,
-    while keeping empty placeholder sections (count=0).
+    Rewrite the type=0 (memory cue) section for a given tag in an ANLZ file.
+
+    Rules:
+    - type=0, count=0  → replace with our new section (in-place)
+    - type=0, count>0  → drop (old data being replaced)
+    - type=1 (any)     → always keep unchanged (hot cue sections must not move)
+    - other tags       → keep unchanged
     """
     data = path.read_bytes()
     pmai_hdr_len = struct.unpack_from('>I', data, 4)[0]
     pmai_hdr = bytearray(data[:pmai_hdr_len])
     pos = pmai_hdr_len
     sections = []
+    inserted = False
+
     while pos < len(data) - 12:
         tag = data[pos:pos+4]
         if tag == b'\x00\x00\x00\x00':
@@ -498,18 +505,33 @@ def _rewrite_anlz(path: Path, cues: list[dict], new_section_tag: bytes, build_fn
         if tlen < 12:
             break
         if tag == new_section_tag:
-            # Keep empty placeholders; skip populated sections
+            sec_type = struct.unpack_from('>I', data, pos+12)[0]
             if new_section_tag == b'PCOB':
                 count = struct.unpack_from('>I', data, pos+16)[0]
-            else:  # PCO2: count in the high 16 bits of field[16]
+            else:  # PCO2: count in high 16 bits
                 count = struct.unpack_from('>I', data, pos+16)[0] >> 16
-            if count > 0:
-                pos += tlen
-                continue
-        sections.append(data[pos:pos+tlen])
+
+            if sec_type == 1:
+                # Hot cue section — preserve exactly where it is
+                sections.append(data[pos:pos+tlen])
+            elif not inserted and count == 0:
+                # Empty memory cue placeholder — replace in-place
+                sections.append(build_fn(cues))
+                inserted = True
+            elif count > 0:
+                # Old memory cue data — drop (replaced by the placeholder above)
+                pass
+            else:
+                # Second empty placeholder (edge case) — keep as-is
+                sections.append(data[pos:pos+tlen])
+        else:
+            sections.append(data[pos:pos+tlen])
         pos += tlen
 
-    sections.append(build_fn(cues))
+    if not inserted:
+        # No placeholder found — fall back to appending
+        sections.append(build_fn(cues))
+
     body = b''.join(sections)
     struct.pack_into('>I', pmai_hdr, 8, pmai_hdr_len + len(body))
     path.write_bytes(bytes(pmai_hdr) + body)
@@ -726,8 +748,12 @@ def _build_pco2_hot(hot_cues: list[dict]) -> bytes:
 
 def _rewrite_anlz_hotcues(path: Path, tag: bytes, new_section: bytes) -> None:
     """
-    Replace the type=1 hot cue section in a DAT/EXT file without touching
-    the type=0 memory cue sections.
+    Replace the type=1 (hot cue) section in a DAT/EXT file without touching
+    type=0 memory cue sections.
+
+    - Replaces the first type=1 section encountered (empty or not).
+    - Drops any additional type=1 sections (cleanup from previously broken state).
+    - Preserves all type=0 sections unchanged.
     """
     data = path.read_bytes()
     pmai_hdr_len = struct.unpack_from('>I', data, 4)[0]
@@ -745,9 +771,11 @@ def _rewrite_anlz_hotcues(path: Path, tag: bytes, new_section: bytes) -> None:
             break
         if t == tag:
             sec_type = struct.unpack_from('>I', data, pos+12)[0]
-            if sec_type == 1 and not replaced:
-                sections.append(new_section)
-                replaced = True
+            if sec_type == 1:
+                if not replaced:
+                    sections.append(new_section)
+                    replaced = True
+                # else: drop extra type=1 sections accumulated from broken state
                 pos += tlen
                 continue
         sections.append(data[pos:pos+tlen])
