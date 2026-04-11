@@ -278,8 +278,17 @@ def _trim_phrases(cues: list[dict]) -> list[dict]:
             seen_labels.add(lbl)
             remaining_slots -= 1
 
-    # Second pass: fill with remaining candidates by position
-    extra = [c for c in candidates if c not in priority_picks][:remaining_slots]
+    # Second pass: fill with candidates — prefer new labels first,
+    # then duplicate labels sorted by phrase priority (e.g. 2nd Chorus > 2nd Verse)
+    used = [c for c in candidates if c not in priority_picks]
+    extra_new  = [c for c in used if c['label'] not in seen_labels][:remaining_slots]
+    remaining_slots -= len(extra_new)
+    label_rank = {lbl: i for i, lbl in enumerate(_PHRASE_PRIORITY)}
+    extra_dup  = sorted(
+        (c for c in used if c not in extra_new),
+        key=lambda c: label_rank.get(c['label'], 99)
+    )[:remaining_slots]
+    extra = extra_new + extra_dup
 
     all_selected = kept + priority_picks + extra
     all_selected.sort(key=lambda c: c['ms'])
