@@ -198,52 +198,124 @@ def _build_beat_ms_lookup(anlz_path: Path) -> dict[int, int]:
     return {}
 
 
+_PSSI_XOR_MASK = bytearray.fromhex(
+    "CB E1 EE FA E5 EE AD EE E9 D2 E9 EB E1 E9 F3 E8 E9 F4 E1".replace(" ", "")
+)
+
+
+def _read_pssi_raw(ext_path: Path) -> tuple[int, list] | None:
+    """
+    Parse the PSSI section directly from raw bytes, bypassing pyrekordbox.
+    Handles both garbled (exported) and ungarbled (local) files, and tolerates
+    other sections in the file that pyrekordbox's Const-validators would reject
+    (e.g. PQT2 with u1=0x02000002 instead of 0x01000002).
+
+    Returns (mood, entries) where entries have .beat and .kind attributes,
+    or None if no PSSI section found.
+    """
+    data = ext_path.read_bytes()
+    if len(data) < 28 or data[:4] != b'PMAI':
+        return None
+    # Skip PMAI file header; its len_header is at offset +4
+    pos = struct.unpack_from('>I', data, 4)[0]
+
+    while pos < len(data) - 12:
+        tag     = data[pos:pos + 4]
+        len_tag = struct.unpack_from('>I', data, pos + 8)[0]
+        if len_tag < 12:
+            break
+
+        if tag == b'PSSI':
+            sec = bytearray(data[pos: pos + len_tag])
+
+            # Check garbling: mood is at offset +18; if not 1-3, apply XOR decode
+            len_entries = struct.unpack_from('>H', sec, 16)[0]
+            raw_mood    = struct.unpack_from('>H', sec, 18)[0]
+            if not (1 <= raw_mood <= 3):
+                for x in range(len(sec) - 18):
+                    mask = (_PSSI_XOR_MASK[x % len(_PSSI_XOR_MASK)] + len_entries) & 0xFF
+                    sec[18 + x] ^= mask
+
+            mood = struct.unpack_from('>H', sec, 18)[0]
+
+            class _Entry:
+                __slots__ = ('beat', 'kind')
+                def __init__(self, beat, kind):
+                    self.beat = beat
+                    self.kind = kind
+
+            entries = []
+            entry_off = 32  # content starts at offset 32 (12-byte tag header + 20 PSSI header)
+            for _ in range(len_entries):
+                if entry_off + 24 > len(sec):
+                    break
+                beat = struct.unpack_from('>H', sec, entry_off + 2)[0]
+                kind = struct.unpack_from('>H', sec, entry_off + 4)[0]
+                entries.append(_Entry(beat, kind))
+                entry_off += 24
+
+            return mood, entries
+
+        pos += len_tag
+
+    return None
+
+
 def read_phrases_anlz(anlz_path: Path) -> list[dict] | None:
     """
     Read PSSI phrase data from the EXT file paired with anlz_path (DAT).
     Returns [{"ms": ..., "label": ...}] or None if no phrase data available.
     Caps results at MAX_CUES, preferring musically important phrase types.
+
+    First tries pyrekordbox (fast path); falls back to our own raw parser if
+    pyrekordbox fails (e.g. PQT2 Const validation error on some tracks).
     """
     ext_path = anlz_path.with_suffix('.EXT')
     if not ext_path.exists():
         return None
+
+    mood, entries = None, None
+
+    # Fast path: use pyrekordbox
     try:
         import pyrekordbox.anlz as anlz_mod
         ext = anlz_mod.AnlzFile.parse_file(str(ext_path))
-        if 'PSSI' not in ext.tag_types:
-            return None
+        if 'PSSI' in ext.tag_types:
+            content = ext.get_tag('PSSI').content
+            mood    = content.mood
+            entries = list(content.entries)
+    except Exception:
+        pass
 
-        content   = ext.get_tag('PSSI').content
-        mood      = content.mood
-        entries   = list(content.entries)
-        if not entries:
-            return None
+    # Fallback: raw binary parser (tolerates variant PQT2/other section formats)
+    if mood is None:
+        result = _read_pssi_raw(ext_path)
+        if result is not None:
+            mood, entries = result
 
-        beat_ms   = _build_beat_ms_lookup(anlz_path)
-        if not beat_ms:
-            return None
-
-        label_map = _PHRASE_LABELS.get(mood, _PHRASE_LABELS[2])
-        cues: list[dict] = []
-        for e in entries:
-            ms = beat_ms.get(e.beat)
-            if ms is None:
-                continue
-            label = label_map.get(e.kind, f"Phrase {e.kind}")
-            cues.append({"ms": ms, "label": label})
-
-        if not cues:
-            return None
-
-        # Trim to MAX_CUES: always keep Intro + Outro, then fill by priority
-        if len(cues) > MAX_CUES:
-            cues = _trim_phrases(cues)
-
-        return cues
-
-    except Exception as exc:
-        print(f"    ⚠ Could not read PSSI: {exc}")
+    if mood is None or not entries:
         return None
+
+    beat_ms = _build_beat_ms_lookup(anlz_path)
+    if not beat_ms:
+        return None
+
+    label_map = _PHRASE_LABELS.get(mood, _PHRASE_LABELS[2])
+    cues: list[dict] = []
+    for e in entries:
+        ms = beat_ms.get(e.beat)
+        if ms is None:
+            continue
+        label = label_map.get(e.kind, f"Phrase {e.kind}")
+        cues.append({"ms": ms, "label": label})
+
+    if not cues:
+        return None
+
+    if len(cues) > MAX_CUES:
+        cues = _trim_phrases(cues)
+
+    return cues
 
 
 def _trim_phrases(cues: list[dict]) -> list[dict]:
