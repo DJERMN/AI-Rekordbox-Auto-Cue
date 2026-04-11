@@ -1,25 +1,25 @@
 import librosa, numpy as np, json, sys, warnings
 warnings.filterwarnings("ignore")
 
-# Beat-Grid aus JSON (wird von Node.js übergeben)
+# Beat grid from JSON input passed by Node.js
 data       = json.loads(sys.argv[1])
 audio_path = data["path"]
-bar_times  = data["bar_times"]   # ms jedes PQTZ-Bar-Anfangs (beat_nr==1)
-bpm        = data["bpm"]         # z.B. 174.0 (PQTZ-Tempo)
+bar_times  = data["bar_times"]   # ms for each PQTZ bar start (beat_nr==1)
+bpm        = data["bpm"]         # e.g. 174.0 from PQTZ tempo
 
-print(f"Lade: {audio_path.split('/')[-1]}", flush=True)
+print(f"Loading: {audio_path.split('/')[-1]}", flush=True)
 y, sr    = librosa.load(audio_path, mono=True)
 duration = librosa.get_duration(y=y, sr=sr)
 hop      = 512
 
-# ─── 1. Mel-Spektrum berechnen (128 Bins, dB-skaliert) ──────────────────────
+# ─── 1. Compute mel spectrogram (128 bins, dB-scaled) ───────────────────────
 mel    = librosa.feature.melspectrogram(y=y, sr=sr, hop_length=hop, n_mels=128)
 mel_db = librosa.power_to_db(mel + 1e-8)  # (128, frames)
 
 bar_times_s = [b / 1000.0 for b in bar_times]
 frame_times = librosa.frames_to_time(np.arange(mel_db.shape[1]), sr=sr, hop_length=hop)
 
-# ─── 2. Pro Bar: Durchschnitts-Spektrum berechnen ────────────────────────────
+# ─── 2. Compute average spectrum per bar ─────────────────────────────────────
 bar_vecs = []
 for i, bt in enumerate(bar_times_s):
     t_end  = bar_times_s[i + 1] if i + 1 < len(bar_times_s) else bt + 1.5
@@ -32,10 +32,10 @@ for i, bt in enumerate(bar_times_s):
 
 bar_vecs = np.array(bar_vecs)  # (N_bars, 128)
 
-# ─── 3. Boundary-Score: Cosinus-Distanz Vorher vs. Nachher ──────────────────
-# Vergleicht einen Block von `win_bars` Bars VOR vs. NACH jedem Takt.
-# Hoher Score = das Klangbild wechselt stark = strukturelle Grenze.
-win_bars = 4   # 4 PQTZ-Bars vor/nach = ~2 echte Bars
+# ─── 3. Boundary score: cosine distance before vs. after ────────────────────
+# Compare a block of `win_bars` bars before and after each boundary.
+# A high score means the sound changes strongly, indicating a structural edge.
+win_bars = 4   # 4 PQTZ bars before/after = about 2 real bars
 n        = len(bar_vecs)
 boundary_score = np.zeros(n)
 
@@ -47,12 +47,12 @@ for i in range(win_bars, n - win_bars):
     if norm_b > 0 and norm_a > 0:
         boundary_score[i] = 1.0 - np.dot(before, after) / (norm_b * norm_a)
 
-# ─── 4. Besten Grenzen auswählen mit Mindest-Abstand ────────────────────────
-# Mindestabstand: 16 PQTZ-Bars (= ~8 echte Bars bei halbierten BPM)
+# ─── 4. Select the strongest boundaries with minimum spacing ─────────────────
+# Minimum spacing: 16 PQTZ bars (= about 8 real bars for halved BPM)
 min_gap = 16
-selected_idx = [0]  # Bar 1 immer als Intro
+selected_idx = [0]  # Always keep bar 1 as the intro
 
-sorted_idx = np.argsort(-boundary_score)  # absteigend nach Score
+sorted_idx = np.argsort(-boundary_score)  # descending by score
 for bi in sorted_idx:
     if bi == 0:
         continue
@@ -63,7 +63,7 @@ for bi in sorted_idx:
 
 selected_idx.sort()
 
-# ─── 5. Energie-Level für Labels ────────────────────────────────────────────
+# ─── 5. Energy level for labels ──────────────────────────────────────────────
 rms    = librosa.feature.rms(y=y, hop_length=hop)[0]
 e_vals = []
 for i in selected_idx:
@@ -80,7 +80,7 @@ def label(pos_ratio, e_norm, is_first, is_last):
     if e_norm > 0.40: return "Build"
     return "Verse"
 
-print(f"\n=== {len(selected_idx)} Cues (Cosinus-Boundary-Snap) ===")
+print(f"\n=== {len(selected_idx)} Cues (Cosine Boundary Snap) ===")
 result = []
 for rank, i in enumerate(selected_idx):
     ms    = bar_times[i]

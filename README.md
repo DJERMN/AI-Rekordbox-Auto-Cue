@@ -1,18 +1,18 @@
 # autocue
 
-Automatisches Setzen von Rekordbox-Memory-Cues anhand von Beatgrid- und Audio-Analyse.
+Automatic Rekordbox memory-cue generation based on beatgrid and audio analysis.
 
-Das Projekt kombiniert:
+The project combines:
 
-- `autocue.py` fuer die Hauptpipeline
-- `analyze_snap.py` fuer die strukturelle Audio-Analyse
-- `rb.js` als Helper zum Lesen von `export.pdb`
+- `autocue.py` for the main pipeline
+- `analyze_snap.py` for structural audio analysis
+- `rb.js` as a helper for reading `export.pdb`
 
-## Voraussetzungen
+## Requirements
 
 - Python 3.11+
 - Node.js 20+
-- Rekordbox-Library mit Zugriff auf `export.pdb`, `master.db` und die `USBANLZ`-Dateien
+- A Rekordbox library with access to `export.pdb`, `master.db`, and the `USBANLZ` files
 
 ## Installation
 
@@ -23,29 +23,29 @@ pip install -r requirements.txt
 npm install
 ```
 
-## Konfiguration
+## Configuration
 
-Optional ueber Umgebungsvariablen:
+Optional environment variables:
 
-- `AUTOCUE_REKORDBOX_DRIVE` - Standard: `D:\`
-- `AUTOCUE_PDB` - Pfad zu `export.pdb`
-- `AUTOCUE_MASTER_DB` - Pfad zur exportierten `master.db`
-- `AUTOCUE_LOCAL_MASTER_DB` - Pfad zur lokalen Rekordbox-`master.db`
-- `AUTOCUE_LOCAL_ANLZ_BASE` - Pfad zum lokalen `USBANLZ`-Ordner
+- `AUTOCUE_REKORDBOX_DRIVE` - default: `D:\`
+- `AUTOCUE_PDB` - path to `export.pdb`
+- `AUTOCUE_MASTER_DB` - path to the exported `master.db`
+- `AUTOCUE_LOCAL_MASTER_DB` - path to the local Rekordbox `master.db`
+- `AUTOCUE_LOCAL_ANLZ_BASE` - path to the local `USBANLZ` directory
 
-`rb.js` liest `AUTOCUE_PDB` und faellt sonst auf `D:\PIONEER\rekordbox\export.pdb` zurueck.
+`rb.js` reads `AUTOCUE_PDB` and otherwise falls back to `D:\PIONEER\rekordbox\export.pdb`.
 
-## Verwendung
+## Usage
 
 ```powershell
-python autocue.py "Trackname"
+python autocue.py "Track Name"
 python autocue.py --id 12345
-python autocue.py --playlist "Meine Playlist"
+python autocue.py --playlist "My Playlist"
 python autocue.py --all
 python autocue.py --list
-python autocue.py --dry --playlist "Meine Playlist"
+python autocue.py --dry --playlist "My Playlist"
 ```
 
-## Hinweis
+## Note
 
-Das Script schreibt in Rekordbox-Analyse-Dateien und in `master.db`. Vor produktivem Einsatz sollte eine Sicherung der Library vorhanden sein.
+The script writes to Rekordbox analysis files and to `master.db`. Back up your library before using it in production.

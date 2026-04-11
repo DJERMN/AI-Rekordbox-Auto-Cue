@@ -3,10 +3,10 @@
  * Requires: npm install rekordbox-parser  (already installed)
  *
  * Usage:
- *   node rb.js list                        - alle Playlists/Ordner anzeigen
- *   node rb.js show "<Name>"               - Tracks einer Playlist anzeigen
- *   node rb.js rate <TrackID> <0-5>        - Rating eines Tracks setzen
- *   node rb.js search "<Begriff>"          - Tracks durchsuchen
+ *   node rb.js list                        - list all playlists/folders
+ *   node rb.js show "<Name>"               - show tracks in a playlist
+ *   node rb.js rate <TrackID> <0-5>        - set a track rating
+ *   node rb.js search "<Query>"            - search tracks
  */
 'use strict';
 
@@ -92,13 +92,13 @@ function cmdShow(query) {
   const { tracks, artists, albums, plNodes, entryMap } = loadPdb();
   const matches = findPlaylist(plNodes, query);
   if (!matches.length) {
-    console.error(`Keine Playlist gefunden für: "${query}"`);
+    console.error(`No playlist found for: "${query}"`);
     process.exit(1);
   }
   for (const pl of matches) {
     const name = str(pl.name);
     const plEntries = (entryMap.get(pl.id) || []).sort((a,b) => a.entryIndex - b.entryIndex);
-    console.log(`\n── ${name} (${plEntries.length} Tracks) ──────────────────`);
+    console.log(`\n── ${name} (${plEntries.length} tracks) ──────────────────`);
     for (const e of plEntries) {
       const t = tracks.get(e.trackId);
       if (t) console.log(trackLine(t, artists));
@@ -132,7 +132,7 @@ function cmdSearch(query) {
   const { tracks, artists } = loadPdb();
   const q = query.toLowerCase();
   let found = 0;
-  console.log(`\n── Suche: "${query}" ──────────────────────────────────`);
+  console.log(`\n── Search: "${query}" ──────────────────────────────────`);
   for (const t of tracks.values()) {
     const title  = str(t.title).toLowerCase();
     const artist = str((artists.get(t.artistId)||{}).name||'').toLowerCase();
@@ -141,20 +141,20 @@ function cmdSearch(query) {
       found++;
     }
   }
-  console.log(`\n${found} Treffer.`);
+  console.log(`\n${found} matches.`);
 }
 
 function cmdRate(trackId, rating) {
   const id = parseInt(trackId);
   const r  = parseInt(rating);
   if (isNaN(id) || isNaN(r) || r < 0 || r > 5) {
-    console.error('Verwendung: node rb.js rate <TrackID> <0-5>');
+    console.error('Usage: node rb.js rate <TrackID> <0-5>');
     process.exit(1);
   }
 
   const { buf, tracks, artists } = loadPdb();
   const t = tracks.get(id);
-  if (!t) { console.error(`Track ID ${id} nicht gefunden.`); process.exit(1); }
+  if (!t) { console.error(`Track ID ${id} not found.`); process.exit(1); }
 
   // Locate the rating byte: scan for track row by ID (u32LE at row+72, subtype 0x24 at row+0)
   // The kaitai IO byteOffset gives the absolute position of the row in the file
@@ -171,7 +171,7 @@ function cmdRate(trackId, rating) {
         found = i; break;
       }
     }
-    if (found < 0) { console.error('Track-Position konnte nicht gefunden werden.'); process.exit(1); }
+    if (found < 0) { console.error('Could not locate track position.'); process.exit(1); }
     buf[found + 89] = r;
     fs.writeFileSync(PDB, buf);
   } else {
@@ -181,7 +181,7 @@ function cmdRate(trackId, rating) {
 
   const title  = str(t.title);
   const artist = str((artists.get(t.artistId)||{}).name||'');
-  console.log(`✅ Rating gesetzt: ${artist} – ${title}`);
+  console.log(`✅ Rating updated: ${artist} – ${title}`);
   console.log(`   ${STARS[t.rating]} → ${STARS[r]}`);
 }
 
@@ -196,10 +196,10 @@ switch (cmd) {
   case 'find':   cmdFind(args.join(' ')); break;
   default:
     console.log(`
-Verwendung:
-  node rb.js list                  – alle Playlists anzeigen
-  node rb.js show "<Name>"         – Tracks einer Playlist
-  node rb.js rate <ID> <0-5>       – Rating setzen
-  node rb.js search "<Begriff>"    – Tracks suchen
+Usage:
+  node rb.js list                  - list all playlists
+  node rb.js show "<Name>"         - show tracks in a playlist
+  node rb.js rate <ID> <0-5>       - set a rating
+  node rb.js search "<Query>"      - search tracks
     `);
 }

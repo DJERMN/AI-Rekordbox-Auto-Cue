@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
 """
-autocue.py - Automatische Memory-Cues fuer Rekordbox
+autocue.py - Automatic Rekordbox memory cues
 
-Verwendung:
-  python autocue.py "Trackname"        - Cues fuer einen Track setzen
-  python autocue.py --id 12345         - Track per Rekordbox-ID
-  python autocue.py --playlist "Name"  - Alle Tracks einer Playlist bearbeiten
-  python autocue.py --all              - Alle Tracks ohne Cues bearbeiten
-  python autocue.py --list             - Tracks ohne Cues auflisten
-  python autocue.py --dry --all        - Analyse ohne Schreibzugriff
+Usage:
+  python autocue.py "Track Name"       - write cues for one track
+  python autocue.py --id 12345         - process a track by Rekordbox ID
+  python autocue.py --playlist "Name"  - process all tracks in a playlist
+  python autocue.py --all              - process all tracks without cues
+  python autocue.py --list             - list tracks without cues
+  python autocue.py --dry --all        - run analysis without writing changes
 
-Konfiguration optional ueber Umgebungsvariablen:
+Optional configuration via environment variables:
   AUTOCUE_REKORDBOX_DRIVE
   AUTOCUE_PDB
   AUTOCUE_MASTER_DB
@@ -25,7 +25,7 @@ from datetime import datetime, timezone
 
 warnings.filterwarnings("ignore")
 
-# ── Konfiguration ────────────────────────────────────────────────────────────
+# ── configuration ────────────────────────────────────────────────────────────
 PYTHON = sys.executable
 NODE = 'node'
 HERE = Path(__file__).parent
@@ -36,14 +36,14 @@ D_DRIVE = Path(DEFAULT_DRIVE)
 DEFAULT_RB_ROOT = Path(os.environ.get('APPDATA', str(Path.home()))) / 'Pioneer' / 'rekordbox'
 MASTER_DB = Path(os.environ.get('AUTOCUE_MASTER_DB', str(D_DRIVE / 'PIONEER' / 'Master' / 'master.db')))
 
-# Lokaler ANLZ-Store fuer Tracks, die noch nicht auf das Export-Laufwerk geschrieben wurden.
+# Local ANLZ store for tracks not yet exported to the target drive.
 LOCAL_ANLZ_BASE = Path(
     os.environ.get(
         'AUTOCUE_LOCAL_ANLZ_BASE',
         str(DEFAULT_RB_ROOT / 'share' / 'PIONEER' / 'USBANLZ'),
     )
 )
-# Lokale Rekordbox master.db als fuehrende Library-Datenbank.
+# Local Rekordbox master.db used as the primary library database.
 LOCAL_MASTER_DB = Path(
     os.environ.get(
         'AUTOCUE_LOCAL_MASTER_DB',
@@ -53,7 +53,7 @@ LOCAL_MASTER_DB = Path(
 
 
 def resolve_anlz_path(anlz_rel: str) -> Path | None:
-    """Löst einen ANLZ-Pfad auf — prüft zuerst D:, dann lokalen Share."""
+    """Resolve an ANLZ path by checking the export drive first, then the local share."""
     rel = anlz_rel.lstrip('/')
     # z.B. "PIONEER/USBANLZ/P021/00026C19/ANLZ0000.DAT"
     # Strip "PIONEER/USBANLZ/" prefix to get sub-path
@@ -71,51 +71,51 @@ def resolve_anlz_path(anlz_rel: str) -> Path | None:
 
 
 def resolve_audio_path(file_path: str) -> Path | None:
-    """Löst einen Audio-Dateipfad auf — unterstützt absolute & D:-relative Pfade."""
+    """Resolve an audio file path, supporting absolute and drive-relative paths."""
     if not file_path:
         return None
-    # Absoluter Pfad (z.B. C:/Music/Track.wav)
+    # Absolute path (for example C:/Music/Track.wav)
     p = Path(file_path.replace('/', '\\'))
     if p.is_absolute() and p.exists():
         return p
-    # Relativer Pfad (z.B. /Contents/...) → auf D: suchen
+    # Relative path (for example /Contents/...) -> resolve on the export drive
     rel_path = D_DRIVE / file_path.lstrip('/')
     if rel_path.exists():
         return rel_path
     return None
 
-MAX_CUES  = 8    # max Memory Cues to write
-WIN_BARS  = 4    # Bars vor/nach für Cosinus-Vergleich
-MIN_GAP   = 16   # Mindestabstand in PQTZ-Bars
+MAX_CUES  = 8    # maximum number of memory cues to write
+WIN_BARS  = 4    # bars before/after for cosine comparison
+MIN_GAP   = 16   # minimum gap in PQTZ bars
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# 1. TRACK-SUCHE via rb.js (export.pdb)
+# 1. TRACK LOOKUP via rb.js (export.pdb)
 # ══════════════════════════════════════════════════════════════════════════════
 
 def find_tracks_pdb(query: str) -> list[dict]:
-    """Sucht Tracks in export.pdb via rb.js find-Kommando."""
+    """Search tracks in export.pdb using the rb.js find command."""
     result = subprocess.run(
         [NODE, str(RB_JS), 'find', query],
         capture_output=True, text=True, encoding='utf-8', errors='replace'
     )
     if result.returncode != 0:
-        raise RuntimeError(f"rb.js Fehler: {result.stderr.strip()}")
+        raise RuntimeError(f"rb.js error: {result.stderr.strip()}")
     return json.loads(result.stdout.strip() or '[]')
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# 2. BEAT-GRID lesen aus ANLZ (PQTZ-Section)
+# 2. READ BEAT GRID from ANLZ (PQTZ section)
 # ══════════════════════════════════════════════════════════════════════════════
 
 def read_beat_grid(anlz_path: Path) -> tuple[list[int], float]:
     """
-    Liest PQTZ-Section aus ANLZ0000.DAT.
-    Gibt (bar_times_ms, bpm) zurück. bar_times = Timestamps aller Beat-1-Positionen.
+    Read the PQTZ section from ANLZ0000.DAT.
+    Returns (bar_times_ms, bpm), where bar_times are timestamps for each beat-1 position.
     """
     data = anlz_path.read_bytes()
-    pmai_hdr_len = struct.unpack_from('>I', data, 4)[0]  # dynamisch lesen
-    pos = pmai_hdr_len  # Kind-Sections beginnen nach PMAI-Header
+    pmai_hdr_len = struct.unpack_from('>I', data, 4)[0]  # read dynamically
+    pos = pmai_hdr_len  # child sections start after the PMAI header
     while pos < len(data) - 12:
         tag = data[pos:pos+4]
         hdr_len   = struct.unpack_from('>I', data, pos+4)[0]
@@ -140,16 +140,16 @@ def read_beat_grid(anlz_path: Path) -> tuple[list[int], float]:
         if total_len < 12:
             break
         pos += total_len
-    raise ValueError(f"Keine PQTZ-Section gefunden in {anlz_path}")
+        raise ValueError(f"No PQTZ section found in {anlz_path}")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# 3. CUE-ERKENNUNG (Mel-Kosinus-Distanz, identisch zu analyze_snap.py)
+# 3. CUE DETECTION (mel cosine distance, same logic as analyze_snap.py)
 # ══════════════════════════════════════════════════════════════════════════════
 
 def detect_cues(audio_path: Path, bar_times: list[int], bpm: float) -> list[dict]:
     """
-    Ruft analyze_snap.py auf und gibt Cue-Liste zurück.
+    Run analyze_snap.py and return the cue list.
     Format: [{"ms": 1234, "label": "Drop"}, ...]
     """
     payload = json.dumps({
@@ -162,19 +162,19 @@ def detect_cues(audio_path: Path, bar_times: list[int], bpm: float) -> list[dict
         capture_output=True, text=True
     )
     if result.returncode != 0:
-        raise RuntimeError(f"analyze_snap.py Fehler:\n{result.stderr.strip()}")
+        raise RuntimeError(f"analyze_snap.py error:\n{result.stderr.strip()}")
     # Parse JSON output (last "JSON:..." line)
     for line in reversed(result.stdout.splitlines()):
         if line.startswith('JSON:'):
             return json.loads(line[5:])
-    raise ValueError("Kein JSON-Output von analyze_snap.py")
+    raise ValueError("No JSON output from analyze_snap.py")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# 4. MASTER.DB schreiben (pyrekordbox)
+# 4. WRITE MASTER.DB (pyrekordbox)
 # ══════════════════════════════════════════════════════════════════════════════
 
-# Globale DB-Session (einmal geöffnet, für alle Tracks wiederverwendet)
+# Global DB session, opened once and reused for all tracks
 _db_session = None
 _DjmdContent = None
 _DjmdCue = None
@@ -193,11 +193,11 @@ def _get_db_session():
 
 
 def write_cues_masterdb(file_path: str, cues: list[dict]) -> bool:
-    """Schreibt Memory Cues in master.db (DB-Session wird einmalig geöffnet)."""
+    """Write memory cues to master.db using a shared DB session."""
     try:
         session, DjmdContent, DjmdCue = _get_db_session()
     except Exception as e:
-        print(f"  ⚠ master.db nicht erreichbar: {e}")
+        print(f"  ⚠ master.db unavailable: {e}")
         return False
 
     norm_path = file_path.replace('\\', '/')
@@ -207,7 +207,7 @@ def write_cues_masterdb(file_path: str, cues: list[dict]) -> bool:
     if content is None:
         content = session.query(DjmdContent).filter(DjmdContent.FileNameL == filename).first()
     if content is None:
-        print(f"  ⚠ Track nicht in master.db gefunden: {filename}")
+        print(f"  ⚠ Track not found in master.db: {filename}")
         return False
 
     content_id = content.ID
@@ -254,11 +254,11 @@ def write_cues_masterdb(file_path: str, cues: list[dict]) -> bool:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# 5. ANLZ schreiben (PCOB/PCPT Binary)
+# 5. WRITE ANLZ (PCOB/PCPT binary)
 # ══════════════════════════════════════════════════════════════════════════════
 
 def _build_pcob(cues: list[dict]) -> bytes:
-    """Baut PCOB-Section (Memory Cues, älteres DAT-Format) als Bytes."""
+    """Build a PCOB section (memory cues, legacy DAT format) as bytes."""
     entries = b''
     for i, c in enumerate(cues):
         prev = 0xFFFF if i == 0 else i - 1
@@ -291,18 +291,18 @@ def _build_pcob(cues: list[dict]) -> bytes:
 
 
 def _build_pcp2(cue: dict) -> bytes:
-    """Baut PCP2-Eintrag (108 Bytes, neues EXT-Format)."""
+    """Build a PCP2 entry (108 bytes, newer EXT format)."""
     label_utf16 = cue['label'].encode('utf-16-be') + b'\x00\x00'
     str_byte_len = len(label_utf16)
     entry = struct.pack('>4sIIIHHIIIII',
         b'PCP2',
         16,           # hdr_len
-        108,          # total_len (immer 108, Rest zero-padded)
+        108,          # total_len (always 108, remainder zero-padded)
         0,            # unknown
         0x0100,       # const
         0x03E8,       # const
         cue['ms'],    # time_ms
-        0xFFFFFFFF,   # loop_end (kein Loop)
+        0xFFFFFFFF,   # loop_end (no loop)
         0x00010000,   # const
         0,            # zeros
         0,            # zeros
@@ -314,7 +314,7 @@ def _build_pcp2(cue: dict) -> bytes:
 
 
 def _build_pco2(cues: list[dict]) -> bytes:
-    """Baut PCO2-Section (neues EXT-Format) als Bytes."""
+    """Build a PCO2 section (newer EXT format) as bytes."""
     entries = b''.join(_build_pcp2(c) for c in cues)
     n = len(cues)
     total = 20 + len(entries)
@@ -330,8 +330,8 @@ def _build_pco2(cues: list[dict]) -> bytes:
 
 def _rewrite_anlz(path: Path, cues: list[dict], new_section_tag: bytes, build_fn) -> None:
     """
-    Generisches ANLZ-Rewrite: ersetzt Sections mit count>0 durch neue,
-    leere Platzhalter-Sections (count=0) bleiben erhalten.
+    Generic ANLZ rewrite: replace sections with count>0 by new ones,
+    while keeping empty placeholder sections (count=0).
     """
     data = path.read_bytes()
     pmai_hdr_len = struct.unpack_from('>I', data, 4)[0]
@@ -346,10 +346,10 @@ def _rewrite_anlz(path: Path, cues: list[dict], new_section_tag: bytes, build_fn
         if tlen < 12:
             break
         if tag == new_section_tag:
-            # Leere Platzhalter behalten; Sections mit Einträgen überspringen
+            # Keep empty placeholders; skip populated sections
             if new_section_tag == b'PCOB':
                 count = struct.unpack_from('>I', data, pos+16)[0]
-            else:  # PCO2: count in high 16 bits von field[16]
+            else:  # PCO2: count in the high 16 bits of field[16]
                 count = struct.unpack_from('>I', data, pos+16)[0] >> 16
             if count > 0:
                 pos += tlen
@@ -364,73 +364,73 @@ def _rewrite_anlz(path: Path, cues: list[dict], new_section_tag: bytes, build_fn
 
 
 def write_cues_anlz(anlz_path: Path, cues: list[dict]) -> None:
-    """Schreibt Memory Cues in ANLZ0000.DAT (PCOB) und ANLZ0000.EXT (PCO2)."""
-    # DAT: älteres PCOB-Format (CDJ-kompatibel)
+    """Write memory cues to ANLZ0000.DAT (PCOB) and ANLZ0000.EXT (PCO2)."""
+    # DAT: legacy PCOB format (CDJ-compatible)
     _rewrite_anlz(anlz_path, cues, b'PCOB', _build_pcob)
 
-    # EXT: neues PCO2-Format (Rekordbox Desktop + moderne CDJs)
+    # EXT: newer PCO2 format (Rekordbox desktop + modern CDJs)
     ext_path = anlz_path.with_suffix('.EXT')
     if ext_path.exists():
         _rewrite_anlz(ext_path, cues, b'PCO2', _build_pco2)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# 6. HAUPT-PIPELINE
+# 6. MAIN PIPELINE
 # ══════════════════════════════════════════════════════════════════════════════
 
 def process_track(track: dict, dry_run: bool = False) -> bool:
-    """Verarbeitet einen Track: Analyse → Cues schreiben. Gibt True bei Erfolg."""
+    """Process one track: analyze it and write cues. Returns True on success."""
     title    = track['title']
     artist   = track['artist']
     anlz_rel = track.get('analyzePath') or track.get('AnalysisDataPath', '')
     file_path = track.get('filePath') or track.get('FolderPath', '')
 
     if not anlz_rel or not file_path:
-        print(f"  ✗ Kein ANLZ- oder Dateipfad für: {artist} – {title}")
+        print(f"  ✗ Missing ANLZ or file path for: {artist} – {title}")
         return False
 
     anlz_path  = resolve_anlz_path(anlz_rel)
     audio_path = resolve_audio_path(file_path)
 
     if not anlz_path:
-        print(f"  ✗ ANLZ nicht gefunden: {anlz_rel}")
+        print(f"  ✗ ANLZ not found: {anlz_rel}")
         return False
     if not audio_path:
-        print(f"  ✗ Audiodatei nicht gefunden: {file_path}")
+        print(f"  ✗ Audio file not found: {file_path}")
         return False
 
     print(f"\n🎵  {artist} – {title}")
     print(f"    ANLZ:  {anlz_path}")
     print(f"    Audio: {audio_path.name}")
 
-    # Beat-Grid lesen
+    # Read beat grid
     try:
         bar_times, bpm = read_beat_grid(anlz_path)
         print(f"    Beat-Grid: {len(bar_times)} Bars, {bpm:.1f} BPM")
     except Exception as e:
-        print(f"  ✗ Beat-Grid Fehler: {e}")
+        print(f"  ✗ Beat grid error: {e}")
         return False
 
     if len(bar_times) < 8:
-        print(f"  ✗ Zu wenige Bars ({len(bar_times)}) — Track überspringen")
+        print(f"  ✗ Too few bars ({len(bar_times)}) - skipping track")
         return False
 
-    # Cue-Erkennung
+    # Detect cues
     try:
         cues = detect_cues(audio_path, bar_times, bpm)
-        print(f"    Cues gefunden: {len(cues)}")
+        print(f"    Cues found: {len(cues)}")
         for c in cues:
             ms = c['ms']
             print(f"      {ms//60000}:{(ms%60000)/1000:05.2f}  {c['label']}")
     except Exception as e:
-        print(f"  ✗ Analyse Fehler: {e}")
+        print(f"  ✗ Analysis error: {e}")
         return False
 
     if dry_run:
-        print("    [dry-run: nichts geschrieben]")
+        print("    [dry-run: nothing written]")
         return True
 
-    # ANLZ Backup (DAT + EXT)
+    # ANLZ backup (DAT + EXT)
     for suffix in ['.DAT', '.EXT']:
         orig = anlz_path.with_suffix(suffix)
         if orig.exists():
@@ -438,26 +438,26 @@ def process_track(track: dict, dry_run: bool = False) -> bool:
             if not bak.exists():
                 shutil.copy2(orig, bak)
 
-    # Schreiben
+    # Write output
     try:
         write_cues_anlz(anlz_path, cues)
-        print(f"    ✅ ANLZ geschrieben ({len(cues)} Cues)")
+        print(f"    ✅ ANLZ written ({len(cues)} cues)")
     except Exception as e:
-        print(f"  ✗ ANLZ Schreibfehler: {e}")
+        print(f"  ✗ ANLZ write error: {e}")
         return False
 
     try:
         ok = write_cues_masterdb(file_path, cues)
         if ok:
-            print(f"    ✅ master.db geschrieben")
+            print(f"    ✅ master.db written")
     except Exception as e:
-        print(f"  ⚠ master.db Fehler: {e}")
+        print(f"  ⚠ master.db error: {e}")
 
     return True
 
 
 def has_cues_anlz(anlz_path: Path) -> bool:
-    """Prüft ob bereits Cues in den ANLZ-Dateien vorhanden sind (DAT + EXT)."""
+    """Check whether cues already exist in the ANLZ files (DAT + EXT)."""
     def _check(path: Path, tag: bytes, count_fn) -> bool:
         try:
             data = path.read_bytes()
@@ -486,7 +486,7 @@ def has_cues_anlz(anlz_path: Path) -> bool:
 
 
 def has_cues_masterdb(file_path: str) -> bool:
-    """Prüft ob ein Track bereits Cues in master.db hat (primäre Quelle für Rekordbox Desktop)."""
+    """Check whether a track already has cues in master.db, the primary desktop source."""
     try:
         session, DjmdContent, DjmdCue = _get_db_session()
         filename = file_path.replace('\\', '/').split('/')[-1]
@@ -505,13 +505,13 @@ def has_cues_masterdb(file_path: str) -> bool:
 def cmd_single(query: str, dry_run: bool = False):
     tracks = find_tracks_pdb(query)
     if not tracks:
-        print(f"Kein Track gefunden für: \"{query}\"")
+        print(f"No track found for: \"{query}\"")
         sys.exit(1)
     if len(tracks) > 1:
-        print(f"{len(tracks)} Treffer:")
+        print(f"{len(tracks)} matches:")
         for t in tracks:
             print(f"  [{t['id']:5}] {t['artist']} – {t['title']}")
-        print("\nBitte genauer suchen oder --id <ID> verwenden.")
+        print("\nPlease refine the query or use --id <ID>.")
         sys.exit(1)
     process_track(tracks[0], dry_run=dry_run)
 
@@ -520,13 +520,13 @@ def cmd_by_id(track_id: int, dry_run: bool = False):
     tracks = find_tracks_pdb(str(track_id))
     match = next((t for t in tracks if t['id'] == track_id), None)
     if not match:
-        print(f"Track ID {track_id} nicht gefunden.")
+        print(f"Track ID {track_id} not found.")
         sys.exit(1)
     process_track(match, dry_run=dry_run)
 
 
 def _load_all_local_tracks() -> list[dict]:
-    """Lädt alle Tracks aus dem lokalen Rekordbox master.db (inkl. neue UUID-ANLZ-Tracks)."""
+    """Load all tracks from the local Rekordbox master.db, including UUID-based ANLZ tracks."""
     try:
         import logging
         logging.disable(logging.WARNING)
@@ -546,23 +546,23 @@ def _load_all_local_tracks() -> list[dict]:
             })
         return tracks
     except Exception as e:
-        print(f"  ⚠ Lokales master.db nicht lesbar: {e}")
+        print(f"  ⚠ Local master.db could not be read: {e}")
         return []
 
 
 def cmd_all(dry_run: bool = False, list_only: bool = False):
-    """Verarbeitet alle Tracks ohne Cues (D:-export.pdb + lokales master.db)."""
-    # Tracks aus export.pdb (D: Drive, numerische Pfade)
+    """Process all tracks without cues from export.pdb and the local master.db."""
+    # Tracks from export.pdb (export drive, numeric paths)
     result = subprocess.run(
         [NODE, str(RB_JS), 'find', ''],
         capture_output=True, text=True, encoding='utf-8', errors='replace'
     )
     pdb_tracks = json.loads(result.stdout.strip() or '[]')
 
-    # Tracks aus lokalem master.db (UUID-Pfade, noch nicht exportiert)
+    # Tracks from local master.db (UUID paths, not yet exported)
     local_tracks = _load_all_local_tracks()
 
-    # Deduplizieren: lokale Tracks, die in PDB nicht vorhanden sind (per Dateiname)
+    # Deduplicate local tracks that are not present in the PDB by filename
     pdb_filenames = {t.get('filePath', '').replace('\\', '/').split('/')[-1].lower()
                      for t in pdb_tracks}
     extra_local = [
@@ -579,13 +579,13 @@ def cmd_all(dry_run: bool = False, list_only: bool = False):
             continue
         fp = t.get('filePath', '')
         if fp:
-            # Track ist in master.db → master.db ist maßgeblich für Rekordbox Desktop
+            # If the track is in master.db, that is the authoritative source for Rekordbox desktop
             try:
                 session, DjmdContent, DjmdCue = _get_db_session()
                 filename = fp.replace('\\', '/').split('/')[-1]
                 content = session.query(DjmdContent).filter(DjmdContent.FileNameL == filename).first()
                 if content is not None:
-                    # Track in master.db gefunden → nur cue-Count in master.db zählt
+                    # Track found in master.db -> only the master.db cue count matters
                     cue_count = session.query(DjmdCue).filter(DjmdCue.ContentID == content.ID).count()
                     if cue_count > 0:
                         continue
@@ -593,14 +593,14 @@ def cmd_all(dry_run: bool = False, list_only: bool = False):
                     continue
             except Exception:
                 pass
-        # Fallback: Track nicht in master.db → ANLZ prüfen
+        # Fallback: if the track is not in master.db, inspect the ANLZ files
         anlz_path = resolve_anlz_path(ap)
         if anlz_path and has_cues_anlz(anlz_path):
             continue
         without_cues.append(t)
 
     total = len(all_tracks)
-    print(f"\n{len(without_cues)} Tracks ohne Cues (von {total} gesamt, davon {len(extra_local)} lokal)")
+    print(f"\n{len(without_cues)} tracks without cues (out of {total} total, {len(extra_local)} local-only)")
 
     if list_only:
         for t in without_cues:
@@ -614,7 +614,7 @@ def cmd_all(dry_run: bool = False, list_only: bool = False):
 
 
 def cmd_playlist(playlist_name: str, dry_run: bool = False):
-    """Verarbeitet alle Tracks einer Playlist (nach master.db Cue-Status)."""
+    """Process all tracks in a playlist based on master.db cue state."""
     import logging
     logging.disable(logging.WARNING)
     from pyrekordbox import Rekordbox6Database
@@ -626,13 +626,13 @@ def cmd_playlist(playlist_name: str, dry_run: bool = False):
         # Fuzzy fallback
         target = next((p for p in playlists if p.Name and playlist_name.lower() in p.Name.lower()), None)
     if not target:
-        print(f"Playlist nicht gefunden: {playlist_name!r}")
+        print(f"Playlist not found: {playlist_name!r}")
         available = [p.Name for p in playlists if p.Name]
-        print(f"Verfügbare Playlists: {available}")
+        print(f"Available playlists: {available}")
         sys.exit(1)
 
     songs = list(target.Songs) if target.Songs else []
-    print(f"Playlist: {target.Name!r} — {len(songs)} Tracks")
+    print(f"Playlist: {target.Name!r} — {len(songs)} tracks")
 
     session, DjmdContent, DjmdCue = _get_db_session()
     need_cues = []
@@ -650,7 +650,7 @@ def cmd_playlist(playlist_name: str, dry_run: bool = False):
                 'filePath':    fp,
             })
 
-    print(f"{len(need_cues)}/{len(songs)} Tracks brauchen Cues\n")
+    print(f"{len(need_cues)}/{len(songs)} tracks need cues\n")
     for i, t in enumerate(need_cues, 1):
         print(f"[{i}/{len(need_cues)}]", end='')
         process_track(t, dry_run=dry_run)
@@ -679,7 +679,7 @@ def main():
         cmd_by_id(int(args[idx + 1]), dry_run=dry_run)
         return
 
-    # Positionsargument = Suchbegriff
+    # Positional argument = search query
     query = ' '.join(a for a in args if not a.startswith('--'))
     if not query:
         print(__doc__)
