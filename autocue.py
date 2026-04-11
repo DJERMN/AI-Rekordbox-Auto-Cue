@@ -841,7 +841,7 @@ def write_hot_cues_masterdb(file_path: str, hot_cues: list[dict]) -> bool:
 # 6. MAIN PIPELINE
 # ══════════════════════════════════════════════════════════════════════════════
 
-def process_track(track: dict, dry_run: bool = False) -> bool:
+def process_track(track: dict, dry_run: bool = False, force: bool = False) -> bool:
     """Process one track: analyze it and write cues. Returns True on success."""
     title    = track['title']
     artist   = track['artist']
@@ -938,7 +938,7 @@ def process_track(track: dict, dry_run: bool = False) -> bool:
     if hot_cues:
         anlz_has_hc  = has_hot_cues_anlz(anlz_path)
         masterdb_has_hc = has_hot_cues_masterdb(file_path)
-        if anlz_has_hc or masterdb_has_hc:
+        if not force and (anlz_has_hc or masterdb_has_hc):
             print(f"    ⏭ Hot cues already set — skipping")
         else:
             try:
@@ -1113,8 +1113,15 @@ def cmd_all(dry_run: bool = False, list_only: bool = False):
         process_track(t, dry_run=dry_run)
 
 
-def cmd_playlist(playlist_name: str, dry_run: bool = False):
-    """Process all tracks in a playlist based on master.db cue state."""
+def cmd_playlist(playlist_name: str, dry_run: bool = False, force: bool = False):
+    """Process all tracks in a playlist.
+
+    - force=False: skips tracks that already have hot cues; adds hot cues to
+      tracks with memory cues but no hot cues; fully processes tracks without
+      any cues.
+    - force=True: re-analyses and overwrites memory cues AND hot cues for every
+      track.
+    """
     import logging
     logging.disable(logging.WARNING)
     from pyrekordbox import Rekordbox6Database
@@ -1123,7 +1130,6 @@ def cmd_playlist(playlist_name: str, dry_run: bool = False):
     playlists = list(db.get_playlist())
     target = next((p for p in playlists if p.Name and p.Name.lower() == playlist_name.lower()), None)
     if not target:
-        # Fuzzy fallback
         target = next((p for p in playlists if p.Name and playlist_name.lower() in p.Name.lower()), None)
     if not target:
         print(f"Playlist not found: {playlist_name!r}")
@@ -1132,33 +1138,135 @@ def cmd_playlist(playlist_name: str, dry_run: bool = False):
         sys.exit(1)
 
     songs = list(target.Songs) if target.Songs else []
-    print(f"Playlist: {target.Name!r} — {len(songs)} tracks")
+    print(f"Playlist: {target.Name!r} — {len(songs)} tracks\n")
 
     session, DjmdContent, DjmdCue = _get_db_session()
-    need_cues = []
-    for s in songs:
+    for i, s in enumerate(songs, 1):
         c = s.Content
-        cue_count = session.query(DjmdCue).filter(DjmdCue.ContentID == c.ID).count()
-        if cue_count == 0:
-            fp = c.FolderPath or ''
-            adp = c.AnalysisDataPath or ''
-            need_cues.append({
-                'id':          c.ID,
-                'title':       c.Title or '',
-                'artist':      c.ArtistName or '',
-                'analyzePath': adp,
-                'filePath':    fp,
-            })
+        fp  = c.FolderPath or ''
+        adp = c.AnalysisDataPath or ''
+        track = {
+            'id':          c.ID,
+            'title':       c.Title or '',
+            'artist':      c.ArtistName or '',
+            'analyzePath': adp,
+            'filePath':    fp,
+        }
 
-    print(f"{len(need_cues)}/{len(songs)} tracks need cues\n")
-    for i, t in enumerate(need_cues, 1):
-        print(f"[{i}/{len(need_cues)}]", end='')
-        process_track(t, dry_run=dry_run)
+        cue_count = session.query(DjmdCue).filter(DjmdCue.ContentID == c.ID).count()
+        if force or cue_count == 0:
+            # Full process (re-analyse + overwrite memory cues + hot cues)
+            print(f"[{i}/{len(songs)}]", end='')
+            process_track(track, dry_run=dry_run, force=force)
+        else:
+            # Has memory cues → add hot cues only if missing
+            anlz_path = resolve_anlz_path(adp) if adp else None
+            if anlz_path and (has_hot_cues_anlz(anlz_path) or has_hot_cues_masterdb(fp)):
+                continue  # already complete, silent skip
+            # Try to add hot cues from PSSI
+            if not anlz_path:
+                continue
+            cues = read_phrases_anlz(anlz_path)
+            if not cues:
+                continue
+            hot_cues = select_hot_cues(cues)
+            if not hot_cues:
+                continue
+            slot_name = {1: 'A', 2: 'B', 3: 'C', 4: 'D'}
+            hc_str = ', '.join(f"[{slot_name[h['hot_cue']]}]{h['label']}" for h in hot_cues)
+            print(f"[{i}/{len(songs)}] 🎵  {track['artist']} – {track['title']}")
+            print(f"    + Hot Cues: {hc_str}")
+            if not dry_run:
+                try:
+                    write_hot_cues_anlz(anlz_path, hot_cues)
+                    write_hot_cues_masterdb(fp, hot_cues)
+                    print(f"    ✅ hot cues written")
+                except Exception as e:
+                    print(f"    ✗ {e}")
+
+
+def cmd_playlist_hotcues(playlist_name: str, dry_run: bool = False):
+    """Add hot cues (A/B/C/D) to playlist tracks that have PSSI but no hot cues yet."""
+    import logging
+    logging.disable(logging.WARNING)
+    from pyrekordbox import Rekordbox6Database
+
+    db = Rekordbox6Database(str(LOCAL_MASTER_DB))
+    playlists = list(db.get_playlist())
+    target = next((p for p in playlists if p.Name and p.Name.lower() == playlist_name.lower()), None)
+    if not target:
+        target = next((p for p in playlists if p.Name and playlist_name.lower() in p.Name.lower()), None)
+    if not target:
+        print(f"Playlist not found: {playlist_name!r}")
+        sys.exit(1)
+
+    songs = list(target.Songs) if target.Songs else []
+    print(f"Playlist: {target.Name!r} — {len(songs)} tracks\n")
+
+    ok = skip = err = 0
+    for i, s in enumerate(songs, 1):
+        c = s.Content
+        title  = c.Title or ''
+        artist = c.ArtistName or ''
+        fp     = c.FolderPath or ''
+        adp    = c.AnalysisDataPath or ''
+
+        if not adp:
+            print(f"[{i}/{len(songs)}] ⚠ No ANLZ path — {artist} – {title}")
+            err += 1
+            continue
+
+        anlz_path = resolve_anlz_path(adp)
+        if not anlz_path:
+            print(f"[{i}/{len(songs)}] ⚠ ANLZ not found — {artist} – {title}")
+            err += 1
+            continue
+
+        # Skip if hot cues already set
+        if has_hot_cues_anlz(anlz_path) or has_hot_cues_masterdb(fp):
+            print(f"[{i}/{len(songs)}] ⏭ Already has hot cues — {artist} – {title}")
+            skip += 1
+            continue
+
+        # Derive hot cues from PSSI
+        cues = read_phrases_anlz(anlz_path)
+        if not cues:
+            print(f"[{i}/{len(songs)}] ⚠ No PSSI phrases — {artist} – {title}")
+            err += 1
+            continue
+
+        hot_cues = select_hot_cues(cues)
+        if not hot_cues:
+            print(f"[{i}/{len(songs)}] ⚠ No hot cues selectable — {artist} – {title}")
+            err += 1
+            continue
+
+        slot_name = {1: 'A', 2: 'B', 3: 'C', 4: 'D'}
+        hc_str = ', '.join(f"[{slot_name[h['hot_cue']]}]{h['label']}" for h in hot_cues)
+        print(f"[{i}/{len(songs)}] 🎵  {artist} – {title}")
+        print(f"    Hot Cues: {hc_str}")
+
+        if dry_run:
+            print("    [dry-run]")
+            ok += 1
+            continue
+
+        try:
+            write_hot_cues_anlz(anlz_path, hot_cues)
+            write_hot_cues_masterdb(fp, hot_cues)
+            print(f"    ✅ written")
+            ok += 1
+        except Exception as e:
+            print(f"    ✗ {e}")
+            err += 1
+
+    print(f"\n✅ {ok} written  ⏭ {skip} skipped  ✗ {err} errors")
 
 
 def main():
     args = sys.argv[1:]
     dry_run   = '--dry' in args or '--dry-run' in args
+    force     = '--force' in args
     list_only = '--list' in args
 
     if list_only:
@@ -1171,7 +1279,7 @@ def main():
 
     if '--playlist' in args:
         idx = args.index('--playlist')
-        cmd_playlist(args[idx + 1], dry_run=dry_run)
+        cmd_playlist(args[idx + 1], dry_run=dry_run, force=force)
         return
 
     if '--id' in args:
