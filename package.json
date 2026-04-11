@@ -1,0 +1,20 @@
+{
+  "name": "autocue",
+  "version": "1.0.0",
+  "description": "Automatic Rekordbox memory cue generation",
+  "main": "rb.js",
+  "type": "commonjs",
+  "scripts": {
+    "test": "python -m py_compile autocue.py analyze_snap.py && node --check rb.js"
+  },
+  "keywords": [
+    "rekordbox",
+    "dj",
+    "cue-points",
+    "audio-analysis"
+  ],
+  "license": "ISC",
+  "dependencies": {
+    "rekordbox-parser": "^0.1.2"
+  }
+}
