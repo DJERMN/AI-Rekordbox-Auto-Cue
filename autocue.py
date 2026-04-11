@@ -144,7 +144,150 @@ def read_beat_grid(anlz_path: Path) -> tuple[list[int], float]:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# 3. CUE DETECTION (mel cosine distance, same logic as analyze_snap.py)
+# 3. PHRASE DETECTION from PSSI (Rekordbox phrase analysis)
+# ══════════════════════════════════════════════════════════════════════════════
+
+# Phrase label tables: _PHRASE_LABELS[mood][kind] → display label
+# mood=1 High, mood=2 Mid, mood=3 Low
+# Reference: https://pyrekordbox.readthedocs.io/en/stable/formats/anlz.html
+_PHRASE_LABELS: dict[int, dict[int, str]] = {
+    1: {  # High — Intro / Up / Down / Chorus / Outro
+        1: "Intro",  2: "Up",     3: "Down",
+        5: "Chorus", 6: "Outro",
+        # fall-backs for any undocumented kind values
+        4: "Down",   7: "Outro",  8: "Bridge", 9: "Chorus", 10: "Outro",
+    },
+    2: {  # Mid — Intro / Verse 1-6 / Bridge / Chorus / Outro
+        1: "Intro",   2: "Verse 1", 3: "Verse 2", 4: "Verse 3",
+        5: "Verse 4", 6: "Verse 5", 7: "Verse 6",
+        8: "Bridge",  9: "Chorus",  10: "Outro",
+    },
+    3: {  # Low — Intro / Verse 1-2 / Bridge / Chorus / Outro
+        1: "Intro",
+        2: "Verse 1", 3: "Verse 1", 4: "Verse 1",
+        5: "Verse 2", 6: "Verse 2", 7: "Verse 2",
+        8: "Bridge",  9: "Chorus",  10: "Outro",
+    },
+}
+
+# Priority order for cue selection when > MAX_CUES phrases are present
+_PHRASE_PRIORITY = ["Intro", "Chorus", "Up", "Bridge", "Down",
+                    "Outro", "Verse 1", "Verse 2", "Verse 3",
+                    "Verse 4", "Verse 5", "Verse 6"]
+
+
+def _build_beat_ms_lookup(anlz_path: Path) -> dict[int, int]:
+    """Build a {beat_index (1-based): time_ms} dict from the PQTZ section in a DAT file."""
+    data = anlz_path.read_bytes()
+    pmai_hdr_len = struct.unpack_from('>I', data, 4)[0]
+    pos = pmai_hdr_len
+    while pos < len(data) - 12:
+        tag       = data[pos:pos+4]
+        hdr_len   = struct.unpack_from('>I', data, pos+4)[0]
+        total_len = struct.unpack_from('>I', data, pos+8)[0]
+        if tag == b'PQTZ':
+            len_beats   = struct.unpack_from('>I', data, pos+20)[0]
+            entry_start = pos + hdr_len
+            return {
+                i + 1: struct.unpack_from('>I', data, entry_start + i * 8 + 4)[0]
+                for i in range(len_beats)
+            }
+        if total_len < 12:
+            break
+        pos += total_len
+    return {}
+
+
+def read_phrases_anlz(anlz_path: Path) -> list[dict] | None:
+    """
+    Read PSSI phrase data from the EXT file paired with anlz_path (DAT).
+    Returns [{"ms": ..., "label": ...}] or None if no phrase data available.
+    Caps results at MAX_CUES, preferring musically important phrase types.
+    """
+    ext_path = anlz_path.with_suffix('.EXT')
+    if not ext_path.exists():
+        return None
+    try:
+        import pyrekordbox.anlz as anlz_mod
+        ext = anlz_mod.AnlzFile.parse_file(str(ext_path))
+        if 'PSSI' not in ext.tag_types:
+            return None
+
+        content   = ext.get_tag('PSSI').content
+        mood      = content.mood
+        entries   = list(content.entries)
+        if not entries:
+            return None
+
+        beat_ms   = _build_beat_ms_lookup(anlz_path)
+        if not beat_ms:
+            return None
+
+        label_map = _PHRASE_LABELS.get(mood, _PHRASE_LABELS[2])
+        cues: list[dict] = []
+        for e in entries:
+            ms = beat_ms.get(e.beat)
+            if ms is None:
+                continue
+            label = label_map.get(e.kind, f"Phrase {e.kind}")
+            cues.append({"ms": ms, "label": label})
+
+        if not cues:
+            return None
+
+        # Trim to MAX_CUES: always keep Intro + Outro, then fill by priority
+        if len(cues) > MAX_CUES:
+            cues = _trim_phrases(cues)
+
+        return cues
+
+    except Exception as exc:
+        print(f"    ⚠ Could not read PSSI: {exc}")
+        return None
+
+
+def _trim_phrases(cues: list[dict]) -> list[dict]:
+    """
+    Select up to MAX_CUES entries from a longer phrase list.
+    Strategy: always keep Intro (first) and Outro (last labelled Outro),
+    then fill remaining slots with the first occurrence of each label type,
+    ordered by _PHRASE_PRIORITY, and finally by position.
+    """
+    if not cues:
+        return cues
+
+    kept: list[dict] = [cues[0]]          # always keep Intro
+    outro = next((c for c in reversed(cues) if c['label'] == 'Outro'), None)
+    if outro and outro is not cues[0]:
+        kept.append(outro)
+
+    remaining_slots = MAX_CUES - len(kept)
+    candidates = [c for c in cues if c not in kept]
+
+    # First pass: one representative per priority label
+    seen_labels: set[str] = {c['label'] for c in kept}
+    priority_picks: list[dict] = []
+    for lbl in _PHRASE_PRIORITY:
+        if remaining_slots <= 0:
+            break
+        if lbl in seen_labels:
+            continue
+        match = next((c for c in candidates if c['label'] == lbl), None)
+        if match:
+            priority_picks.append(match)
+            seen_labels.add(lbl)
+            remaining_slots -= 1
+
+    # Second pass: fill with remaining candidates by position
+    extra = [c for c in candidates if c not in priority_picks][:remaining_slots]
+
+    all_selected = kept + priority_picks + extra
+    all_selected.sort(key=lambda c: c['ms'])
+    return all_selected[:MAX_CUES]
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 4. CUE DETECTION fallback (mel cosine distance, same logic as analyze_snap.py)
 # ══════════════════════════════════════════════════════════════════════════════
 
 def detect_cues(audio_path: Path, bar_times: list[int], bpm: float) -> list[dict]:
@@ -395,36 +538,45 @@ def process_track(track: dict, dry_run: bool = False) -> bool:
     if not anlz_path:
         print(f"  ✗ ANLZ not found: {anlz_rel}")
         return False
-    if not audio_path:
-        print(f"  ✗ Audio file not found: {file_path}")
-        return False
+    # audio_path check is deferred: PSSI path does not need the audio file
 
     print(f"\n🎵  {artist} – {title}")
     print(f"    ANLZ:  {anlz_path}")
-    print(f"    Audio: {audio_path.name}")
 
-    # Read beat grid
-    try:
-        bar_times, bpm = read_beat_grid(anlz_path)
-        print(f"    Beat-Grid: {len(bar_times)} Bars, {bpm:.1f} BPM")
-    except Exception as e:
-        print(f"  ✗ Beat grid error: {e}")
-        return False
-
-    if len(bar_times) < 8:
-        print(f"  ✗ Too few bars ({len(bar_times)}) - skipping track")
-        return False
-
-    # Detect cues
-    try:
-        cues = detect_cues(audio_path, bar_times, bpm)
-        print(f"    Cues found: {len(cues)}")
+    # ── 1. Try Rekordbox phrase analysis (PSSI) — no audio needed ────────────
+    cues = read_phrases_anlz(anlz_path)
+    if cues:
+        print(f"    ✦ Phrases (PSSI): {len(cues)} cue(s)")
         for c in cues:
             ms = c['ms']
             print(f"      {ms//60000}:{(ms%60000)/1000:05.2f}  {c['label']}")
-    except Exception as e:
-        print(f"  ✗ Analysis error: {e}")
-        return False
+    else:
+        # ── 2. Fallback: mel cosine analysis — requires audio file ────────────
+        if not audio_path:
+            print(f"  ✗ Audio file not found and no PSSI data: {file_path}")
+            return False
+        print(f"    Audio: {audio_path.name}")
+
+        try:
+            bar_times, bpm = read_beat_grid(anlz_path)
+            print(f"    Beat-Grid: {len(bar_times)} bars, {bpm:.1f} BPM")
+        except Exception as e:
+            print(f"  ✗ Beat grid error: {e}")
+            return False
+
+        if len(bar_times) < 8:
+            print(f"  ✗ Too few bars ({len(bar_times)}) — skipping")
+            return False
+
+        try:
+            cues = detect_cues(audio_path, bar_times, bpm)
+            print(f"    ✦ Mel analysis: {len(cues)} cue(s)")
+            for c in cues:
+                ms = c['ms']
+                print(f"      {ms//60000}:{(ms%60000)/1000:05.2f}  {c['label']}")
+        except Exception as e:
+            print(f"  ✗ Analysis error: {e}")
+            return False
 
     if dry_run:
         print("    [dry-run: nothing written]")

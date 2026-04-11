@@ -16,11 +16,24 @@ const { parsePdb, tableRows } = require('rekordbox-parser');
 
 const PDB = process.env.AUTOCUE_PDB || process.env.PDB || 'D:\\PIONEER\\rekordbox\\export.pdb';
 const STARS = ['☆☆☆☆☆','★☆☆☆☆','★★☆☆☆','★★★☆☆','★★★★☆','★★★★★'];
+const RAW_RATINGS = [0, 51, 102, 153, 204, 255];
 
 // ── helpers ──────────────────────────────────────────────────────────────────
 
 function str(s) {
   try { return s && s.body ? s.body.text : ''; } catch { return ''; }
+}
+
+function rawToStars(rawRating) {
+  const normalized = Number(rawRating) || 0;
+  const exact = RAW_RATINGS.indexOf(normalized);
+  if (exact >= 0) return exact;
+  return Math.max(0, Math.min(5, Math.round(normalized / 51)));
+}
+
+function starsToRaw(stars) {
+  const normalized = Math.max(0, Math.min(5, Number(stars) || 0));
+  return RAW_RATINGS[normalized];
 }
 
 function loadPdb() {
@@ -50,7 +63,7 @@ function trackLine(t, artists) {
   const title  = str(t.title);
   const bpm    = (t.tempo / 100).toFixed(1);
   const dur    = `${Math.floor(t.duration/60)}:${String(t.duration%60).padStart(2,'0')}`;
-  const rating = STARS[t.rating] || STARS[0];
+  const rating = STARS[rawToStars(t.rating)] || STARS[0];
   return `  [${String(t.id).padStart(5)}] ${rating}  ${bpm.padStart(6)} BPM  ${dur}  ${aname} – ${title}`;
 }
 
@@ -147,6 +160,7 @@ function cmdSearch(query) {
 function cmdRate(trackId, rating) {
   const id = parseInt(trackId);
   const r  = parseInt(rating);
+  const rawRating = starsToRaw(r);
   if (isNaN(id) || isNaN(r) || r < 0 || r > 5) {
     console.error('Usage: node rb.js rate <TrackID> <0-5>');
     process.exit(1);
@@ -172,17 +186,17 @@ function cmdRate(trackId, rating) {
       }
     }
     if (found < 0) { console.error('Could not locate track position.'); process.exit(1); }
-    buf[found + 89] = r;
+    buf[found + 89] = rawRating;
     fs.writeFileSync(PDB, buf);
   } else {
-    buf[ratingPos] = r;
+    buf[ratingPos] = rawRating;
     fs.writeFileSync(PDB, buf);
   }
 
   const title  = str(t.title);
   const artist = str((artists.get(t.artistId)||{}).name||'');
   console.log(`✅ Rating updated: ${artist} – ${title}`);
-  console.log(`   ${STARS[t.rating]} → ${STARS[r]}`);
+  console.log(`   ${STARS[rawToStars(t.rating)]} → ${STARS[r]}`);
 }
 
 // ── main ──────────────────────────────────────────────────────────────────────
