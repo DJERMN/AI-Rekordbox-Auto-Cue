@@ -1,4 +1,4 @@
-# autocue
+# autocue Rekordbox instead of paying for premium sub.
 
 Automatic Rekordbox memory-cue generation based on beatgrid and audio analysis.
 
