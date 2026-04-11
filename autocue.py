@@ -527,6 +527,312 @@ def write_cues_anlz(anlz_path: Path, cues: list[dict]) -> None:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# 5b. HOT CUE WRITING (A/B/C/D)
+# ══════════════════════════════════════════════════════════════════════════════
+
+# Slot assignment: A=Intro, B=build (last phrase before chorus), C=Chorus, D=Outro
+_HOT_CUE_LABELS_A = {'Intro'}
+_HOT_CUE_LABELS_B = {'Up', 'Down', 'Verse 1', 'Verse 2', 'Verse 3',
+                      'Verse 4', 'Verse 5', 'Verse 6', 'Verse'}
+_HOT_CUE_LABELS_C = {'Chorus', 'Up'}
+_HOT_CUE_LABELS_D = {'Outro'}
+
+# Hot cue color table indices (Rekordbox native colors)
+_HOT_CUE_COLOR = {1: 36, 2: 22, 3: 22, 4: 22}  # A=green, B/C/D=orange
+
+
+def select_hot_cues(cues: list[dict]) -> list[dict]:
+    """
+    Select up to 4 hot cue points from phrase cues.
+    Returns cues with 'hot_cue' key (1=A, 2=B, 3=C, 4=D).
+
+    Logic:
+      A = first Intro phrase
+      B = last build-type phrase BEFORE the first Chorus (pre-drop)
+      C = first Chorus/Drop phrase
+      D = first Outro phrase
+    """
+    first_chorus_ms = next(
+        (c['ms'] for c in cues if c['label'] in _HOT_CUE_LABELS_C), None
+    )
+
+    slots: dict[int, dict] = {}
+
+    # A: Intro
+    intro = next((c for c in cues if c['label'] in _HOT_CUE_LABELS_A), None)
+    if intro:
+        slots[1] = {**intro, 'hot_cue': 1}
+
+    # B: last build phrase before first Chorus
+    build = next(
+        (c for c in reversed(cues)
+         if c['label'] in _HOT_CUE_LABELS_B
+         and (first_chorus_ms is None or c['ms'] < first_chorus_ms)),
+        None,
+    )
+    if build:
+        slots[2] = {**build, 'hot_cue': 2}
+
+    # C: first Chorus
+    chorus = next((c for c in cues if c['label'] in _HOT_CUE_LABELS_C), None)
+    if chorus:
+        slots[3] = {**chorus, 'hot_cue': 3}
+
+    # D: Outro
+    outro = next((c for c in cues if c['label'] in _HOT_CUE_LABELS_D), None)
+    if outro:
+        slots[4] = {**outro, 'hot_cue': 4}
+
+    return [v for _, v in sorted(slots.items())]
+
+
+def has_hot_cues_anlz(anlz_path: Path) -> bool:
+    """Return True if any type=1 hot cue section in DAT or EXT has cues."""
+    def _check(path: Path, tag: bytes, is_pco2: bool) -> bool:
+        try:
+            data = path.read_bytes()
+            hdr_len = struct.unpack_from('>I', data, 4)[0]
+            pos = hdr_len
+            while pos < len(data) - 12:
+                t = data[pos:pos+4]
+                if t == b'\x00\x00\x00\x00':
+                    break
+                tlen = struct.unpack_from('>I', data, pos+8)[0]
+                if tlen < 12:
+                    break
+                if t == tag:
+                    sec_type = struct.unpack_from('>I', data, pos+12)[0]
+                    if sec_type == 1:
+                        if is_pco2:
+                            count = struct.unpack_from('>I', data, pos+16)[0] >> 16
+                        else:
+                            count = struct.unpack_from('>I', data, pos+16)[0]
+                        if count > 0:
+                            return True
+                pos += tlen
+        except Exception:
+            pass
+        return False
+
+    if _check(anlz_path, b'PCOB', False):
+        return True
+    ext = anlz_path.with_suffix('.EXT')
+    if ext.exists() and _check(ext, b'PCO2', True):
+        return True
+    return False
+
+
+def has_hot_cues_masterdb(file_path: str) -> bool:
+    """Return True if the track already has hot cues (Kind > 0) in master.db."""
+    try:
+        session, DjmdContent, DjmdCue = _get_db_session()
+        norm = file_path.replace('\\', '/')
+        content = (
+            session.query(DjmdContent).filter(DjmdContent.FolderPath == norm).first()
+            or session.query(DjmdContent).filter(
+                DjmdContent.FileNameL == norm.split('/')[-1]
+            ).first()
+        )
+        if content is None:
+            return False
+        return (
+            session.query(DjmdCue)
+            .filter(DjmdCue.ContentID == content.ID, DjmdCue.Kind > 0)
+            .count() > 0
+        )
+    except Exception:
+        return False
+
+
+def _build_pcob_hot(hot_cues: list[dict]) -> bytes:
+    """Build a PCOB type=1 section (hot cues, legacy DAT format)."""
+    entries = b''
+    for i, c in enumerate(hot_cues):
+        prev = 0xFFFF if i == 0 else i - 1
+        entry = struct.pack('>4sIIIIHHHHHHII',
+            b'PCPT',
+            28,               # hdr_len
+            56,               # total_len
+            c['hot_cue'],     # hot_cue slot (1=A, 2=B, 3=C, 4=D)
+            0,                # status
+            1, 0,             # word1, word2
+            prev,             # prev_idx
+            i + 1,            # order (1-indexed)
+            0x0100, 0x03E8,
+            c['ms'],          # time_ms
+            0xFFFFFFFF,       # no loop
+        )
+        entry += b'\x00' * 16
+        entries += entry
+
+    total = 24 + len(entries)
+    header = struct.pack('>4sIIIII',
+        b'PCOB',
+        24,                # hdr_len
+        total,             # total_len
+        1,                 # type=1 (hot cues)
+        len(hot_cues),
+        3,                 # extra constant
+    )
+    return header + entries
+
+
+def _build_pcp2_hot(cue: dict) -> bytes:
+    """Build a PCP2 hot cue entry (88 bytes, observed size for hot cues)."""
+    # Include label if it fits within 88-byte budget
+    # struct = 44 bytes; str_byte_len field = 4 bytes; label_utf16 + padding = 40 bytes max
+    label = cue.get('label', '')
+    label_utf16 = label.encode('utf-16-be') + b'\x00\x00'
+    if len(label_utf16) > 40:           # shouldn't happen with our short labels
+        label_utf16 = b'\x00\x00'
+    str_byte_len = len(label_utf16)
+    entry = struct.pack('>4sIIIHHIIIII',
+        b'PCP2',
+        16,               # hdr_len
+        88,               # total_len (88 for hot cues, observed)
+        cue['hot_cue'],   # slot (1=A, 2=B, 3=C, 4=D)
+        0x0100,           # const
+        0x03E8,           # const
+        cue['ms'],        # time_ms
+        0xFFFFFFFF,       # loop_end (no loop)
+        0x00010000,       # const
+        0,
+        0,
+    )
+    entry += struct.pack('>I', str_byte_len)
+    entry += label_utf16
+    entry += b'\x00' * (88 - len(entry))
+    return entry
+
+
+def _build_pco2_hot(hot_cues: list[dict]) -> bytes:
+    """Build a PCO2 type=1 section (hot cues, newer EXT format)."""
+    entries = b''.join(_build_pcp2_hot(c) for c in hot_cues)
+    n = len(hot_cues)
+    total = 20 + len(entries)
+    header = struct.pack('>4sIIII',
+        b'PCO2',
+        20,        # hdr_len
+        total,     # total_len
+        1,         # type=1 (hot cues)
+        n << 16,   # count in high 16 bits
+    )
+    return header + entries
+
+
+def _rewrite_anlz_hotcues(path: Path, tag: bytes, new_section: bytes) -> None:
+    """
+    Replace the type=1 hot cue section in a DAT/EXT file without touching
+    the type=0 memory cue sections.
+    """
+    data = path.read_bytes()
+    pmai_hdr_len = struct.unpack_from('>I', data, 4)[0]
+    pmai_hdr = bytearray(data[:pmai_hdr_len])
+    pos = pmai_hdr_len
+    sections: list[bytes] = []
+    replaced = False
+
+    while pos < len(data) - 12:
+        t = data[pos:pos+4]
+        if t == b'\x00\x00\x00\x00':
+            break
+        tlen = struct.unpack_from('>I', data, pos+8)[0]
+        if tlen < 12:
+            break
+        if t == tag:
+            sec_type = struct.unpack_from('>I', data, pos+12)[0]
+            if sec_type == 1 and not replaced:
+                sections.append(new_section)
+                replaced = True
+                pos += tlen
+                continue
+        sections.append(data[pos:pos+tlen])
+        pos += tlen
+
+    if not replaced:
+        sections.append(new_section)
+
+    body = b''.join(sections)
+    struct.pack_into('>I', pmai_hdr, 8, pmai_hdr_len + len(body))
+    path.write_bytes(bytes(pmai_hdr) + body)
+
+
+def write_hot_cues_anlz(anlz_path: Path, hot_cues: list[dict]) -> None:
+    """Write hot cues to ANLZ0000.DAT (PCOB type=1) and .EXT (PCO2 type=1)."""
+    _rewrite_anlz_hotcues(anlz_path, b'PCOB', _build_pcob_hot(hot_cues))
+
+    ext_path = anlz_path.with_suffix('.EXT')
+    if ext_path.exists():
+        _rewrite_anlz_hotcues(ext_path, b'PCO2', _build_pco2_hot(hot_cues))
+
+
+def write_hot_cues_masterdb(file_path: str, hot_cues: list[dict]) -> bool:
+    """Add hot cue rows (Kind=1..4) to master.db without touching memory cues."""
+    try:
+        session, DjmdContent, DjmdCue = _get_db_session()
+    except Exception as e:
+        print(f"  ⚠ master.db unavailable: {e}")
+        return False
+
+    import uuid
+    norm = file_path.replace('\\', '/')
+    filename = norm.split('/')[-1]
+    content = (
+        session.query(DjmdContent).filter(DjmdContent.FolderPath == norm).first()
+        or session.query(DjmdContent).filter(DjmdContent.FileNameL == filename).first()
+    )
+    if content is None:
+        print(f"  ⚠ Track not found in master.db: {filename}")
+        return False
+
+    content_id = content.ID
+    now = datetime.now(timezone.utc)
+
+    # Remove any existing hot cues before re-writing
+    session.query(DjmdCue).filter(
+        DjmdCue.ContentID == content_id, DjmdCue.Kind > 0
+    ).delete()
+
+    for c in hot_cues:
+        slot = c['hot_cue']          # 1/2/3/4
+        in_msec = c['ms']
+        in_frame = round(in_msec * 150 / 1000)
+        cue = DjmdCue(
+            ID               = str(random.randint(100_000_000, 2_000_000_000)),
+            ContentID        = content_id,
+            InMsec           = in_msec,
+            InFrame          = in_frame,
+            InMpegFrame      = 0,
+            InMpegAbs        = 0,
+            OutMsec          = -1,
+            OutFrame         = 0,
+            OutMpegFrame     = 0,
+            OutMpegAbs       = 0,
+            Kind             = slot,
+            Color            = 255,
+            ColorTableIndex  = _HOT_CUE_COLOR.get(slot, 22),
+            ActiveLoop       = 0,
+            Comment          = c.get('label', ''),
+            BeatLoopSize     = 0,
+            CueMicrosec      = 0,
+            InPointSeekInfo  = None,
+            OutPointSeekInfo = None,
+            ContentUUID      = content.UUID,
+            UUID             = str(uuid.uuid4()),
+            rb_local_deleted = 0,
+            rb_local_synced  = 0,
+            updated_at       = now,
+            created_at       = now,
+        )
+        session.add(cue)
+
+    content.CueUpdated = '1'
+    content.updated_at = now
+    session.commit()
+    return True
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # 6. MAIN PIPELINE
 # ══════════════════════════════════════════════════════════════════════════════
 
@@ -587,6 +893,15 @@ def process_track(track: dict, dry_run: bool = False) -> bool:
             print(f"  ✗ Analysis error: {e}")
             return False
 
+    # ── Hot cue selection (A/B/C/D) ──────────────────────────────────────────
+    hot_cues = select_hot_cues(cues)
+    if hot_cues:
+        print(f"    ✦ Hot Cues ({len(hot_cues)}):")
+        slot_name = {1: 'A', 2: 'B', 3: 'C', 4: 'D'}
+        for h in hot_cues:
+            ms = h['ms']
+            print(f"      [{slot_name[h['hot_cue']]}] {ms//60000}:{(ms%60000)/1000:05.2f}  {h['label']}")
+
     if dry_run:
         print("    [dry-run: nothing written]")
         return True
@@ -599,7 +914,7 @@ def process_track(track: dict, dry_run: bool = False) -> bool:
             if not bak.exists():
                 shutil.copy2(orig, bak)
 
-    # Write output
+    # Write memory cues
     try:
         write_cues_anlz(anlz_path, cues)
         print(f"    ✅ ANLZ written ({len(cues)} cues)")
@@ -613,6 +928,25 @@ def process_track(track: dict, dry_run: bool = False) -> bool:
             print(f"    ✅ master.db written")
     except Exception as e:
         print(f"  ⚠ master.db error: {e}")
+
+    # Write hot cues — only if none already exist
+    if hot_cues:
+        anlz_has_hc  = has_hot_cues_anlz(anlz_path)
+        masterdb_has_hc = has_hot_cues_masterdb(file_path)
+        if anlz_has_hc or masterdb_has_hc:
+            print(f"    ⏭ Hot cues already set — skipping")
+        else:
+            try:
+                write_hot_cues_anlz(anlz_path, hot_cues)
+                print(f"    ✅ Hot cues written to ANLZ ({len(hot_cues)} slots)")
+            except Exception as e:
+                print(f"  ✗ Hot cue ANLZ write error: {e}")
+            try:
+                ok = write_hot_cues_masterdb(file_path, hot_cues)
+                if ok:
+                    print(f"    ✅ Hot cues written to master.db")
+            except Exception as e:
+                print(f"  ⚠ Hot cue master.db error: {e}")
 
     return True
 
