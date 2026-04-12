@@ -1145,13 +1145,13 @@ def cmd_single(query: str, dry_run: bool = False, force: bool = False):
     process_track(tracks[0], dry_run=dry_run, force=force)
 
 
-def cmd_by_id(track_id: int, dry_run: bool = False):
+def cmd_by_id(track_id: int, dry_run: bool = False, force: bool = False):
     tracks = find_tracks_pdb(str(track_id))
     match = next((t for t in tracks if t['id'] == track_id), None)
     if not match:
         print(f"Track ID {track_id} not found.")
         sys.exit(1)
-    process_track(match, dry_run=dry_run)
+    process_track(match, dry_run=dry_run, force=force)
 
 
 def _load_all_local_tracks() -> list[dict]:
@@ -1413,7 +1413,7 @@ def main():
 
     if '--id' in args:
         idx = args.index('--id')
-        cmd_by_id(int(args[idx + 1]), dry_run=dry_run)
+        cmd_by_id(int(args[idx + 1]), dry_run=dry_run, force=force)
         return
 
     # Positional argument = search query
