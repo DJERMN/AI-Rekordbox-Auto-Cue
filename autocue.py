@@ -416,6 +416,40 @@ def _get_db_session():
     return _db_session, _DjmdContent, _DjmdCue
 
 
+def _find_content_in_db(session, DjmdContent, file_path: str):
+    """
+    Find a DjmdContent row by file path.
+    Tries (in order):
+      1. Exact FolderPath match
+      2. Exact FileNameL match
+      3. LIKE prefix match (handles PDB-truncated filenames, e.g. 'Kanin.mp3')
+    Returns the row or None.
+    """
+    norm_path = file_path.replace('\\', '/')
+    filename  = norm_path.split('/')[-1]
+
+    # 1. Exact full-path match (best, avoids duplicates)
+    row = session.query(DjmdContent).filter(DjmdContent.FolderPath == norm_path).first()
+    if row:
+        return row
+
+    # 2. Exact filename match
+    row = session.query(DjmdContent).filter(DjmdContent.FileNameL == filename).first()
+    if row:
+        return row
+
+    # 3. Prefix LIKE match — PDB truncates long filenames, so e.g.
+    #    "Kanin.mp3" → matches "Kanine Extended).mp3" via stem prefix
+    stem = filename.rsplit('.', 1)[0]          # e.g. "Sub Focus ... Kanin"
+    ext  = filename.rsplit('.', 1)[-1]         # "mp3"
+    if len(stem) >= 10:                        # only try if prefix is meaningful
+        like_pat = f"%{stem[:len(stem)-4]}%.{ext}"  # trim last 4 chars of stem
+        row = session.query(DjmdContent).filter(
+            DjmdContent.FileNameL.like(like_pat)
+        ).first()
+    return row
+
+
 def write_cues_masterdb(file_path: str, cues: list[dict]) -> bool:
     """Write memory cues to master.db using a shared DB session."""
     try:
@@ -424,12 +458,8 @@ def write_cues_masterdb(file_path: str, cues: list[dict]) -> bool:
         print(f"  ⚠ master.db unavailable: {e}")
         return False
 
-    norm_path = file_path.replace('\\', '/')
-    filename = norm_path.split('/')[-1]
-    # Prefer exact full-path match to avoid writing to wrong duplicate track
-    content = session.query(DjmdContent).filter(DjmdContent.FolderPath == norm_path).first()
-    if content is None:
-        content = session.query(DjmdContent).filter(DjmdContent.FileNameL == filename).first()
+    filename = file_path.replace('\\', '/').split('/')[-1]
+    content  = _find_content_in_db(session, DjmdContent, file_path)
     if content is None:
         print(f"  ⚠ Track not found in master.db: {filename}")
         return False
@@ -882,12 +912,8 @@ def write_hot_cues_masterdb(file_path: str, hot_cues: list[dict]) -> bool:
         return False
 
     import uuid
-    norm = file_path.replace('\\', '/')
-    filename = norm.split('/')[-1]
-    content = (
-        session.query(DjmdContent).filter(DjmdContent.FolderPath == norm).first()
-        or session.query(DjmdContent).filter(DjmdContent.FileNameL == filename).first()
-    )
+    filename = file_path.replace('\\', '/').split('/')[-1]
+    content  = _find_content_in_db(session, DjmdContent, file_path)
     if content is None:
         print(f"  ⚠ Track not found in master.db: {filename}")
         return False
