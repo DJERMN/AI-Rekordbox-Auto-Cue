@@ -188,12 +188,43 @@ except Exception:
 
 ### Slot-Mapping
 
-| Slot | master.db Kind | ANLZ hot_cue |
-|------|---------------|--------------|
-| A | 1 | 1 |
-| B | 2 | 2 |
-| C | 3 | 3 |
-| D | 5 | 4 |
+| Typ | master.db Kind | Beschreibung |
+|-----|---------------|--------------|
+| Memory Cue | 0 | Grauer Marker, kein Slot-Buchstabe |
+| Hot Cue A | 1 | |
+| Hot Cue B | 2 | |
+| Hot Cue C | 3 | |
+| Hot Cue D | 5 | |
+
+### Memory Cues schreiben (optional, zusätzlich zu Hot Cues)
+
+```python
+def write_memory_cues(session, content, positions):
+    # positions = [(ms, label), ...]
+    # Bestehende Memory Cues löschen:
+    session.query(DjmdCue).filter(DjmdCue.ContentID == content.ID, DjmdCue.Kind == 0).delete()
+    now = datetime.now(timezone.utc)
+    for ms, label in positions:
+        session.add(DjmdCue(
+            ID=str(random.randint(100_000_000, 2_000_000_000)),
+            ContentID=content.ID,
+            InMsec=ms, InFrame=round(ms * 150 / 1000),
+            InMpegFrame=0, InMpegAbs=0,
+            OutMsec=-1, OutFrame=0, OutMpegFrame=0, OutMpegAbs=0,
+            Kind=0, Color=0, ColorTableIndex=0,
+            ActiveLoop=0, Comment=label, BeatLoopSize=0, CueMicrosec=0,
+            InPointSeekInfo=None, OutPointSeekInfo=None,
+            ContentUUID=content.UUID, UUID=str(uuidmod.uuid4()),
+            rb_local_deleted=0, rb_local_synced=0,
+            updated_at=now, created_at=now,
+        ))
+    content.CueUpdated = '1'
+    content.updated_at = now
+    session.commit()
+```
+
+**Wichtig:** Memory Cues immer *zusätzlich* zu Hot Cues schreiben — nie stattdessen.
+`Kind > 0` = Hot Cues, `Kind == 0` = Memory Cues. Beide unabhängig voneinander löschen/setzen.
 
 ### Auswahl-Logik (bewährt, getestet)
 
