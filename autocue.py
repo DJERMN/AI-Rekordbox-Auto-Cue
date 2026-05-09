@@ -654,15 +654,12 @@ def write_cues_anlz(anlz_path: Path, cues: list[dict]) -> None:
 # 5b. HOT CUE WRITING (A/B/C/D)
 # ══════════════════════════════════════════════════════════════════════════════
 
-# Slot assignment: A=Intro, B=build (last phrase before chorus), C=Chorus/Drop, D=Outro
-# B = "Up" = tension/buildup before the drop; Verse/Bridge for non-EDM tracks
-# C = "Chorus" only = the hard beat / actual drop (NOT "Up" which is the build)
-# "Down" is excluded from B: it means energy decreasing, not a buildup
+# Slot assignment: A=Intro, B=first Chorus, C=Chorus/Down/Bridge ab 45%, D=Outro
 _HOT_CUE_LABELS_A = {'Intro'}
-_HOT_CUE_LABELS_B = {'Up', 'Verse 1', 'Verse 2', 'Verse 3',
-                      'Verse 4', 'Verse 5', 'Verse 6', 'Verse', 'Bridge'}
 _HOT_CUE_LABELS_C = {'Chorus'}
 _HOT_CUE_LABELS_D = {'Outro'}
+
+_THRESHOLD = 0.45  # C muss ab 45% der Songlänge liegen
 
 # ANLZ hot_cue slot → master.db Kind mapping
 # Rekordbox uses Kind=5 for D (Kind=4 is reserved, not a standard hot cue)
@@ -677,42 +674,49 @@ def select_hot_cues(cues: list[dict]) -> list[dict]:
     Select up to 4 hot cue points from phrase cues.
     Returns cues with 'hot_cue' key (1=A, 2=B, 3=C, 4=D).
 
-    Logic:
+    Logic (per SKILL.md):
       A = first Intro phrase
-      B = last build-type phrase BEFORE the first Chorus (pre-drop)
-      C = first Chorus/Drop phrase
+      B = first Chorus
+      C = first Chorus ab 45% Songlänge; fallback: erster Down/Bridge ab 45%;
+          letzter Fallback: letzter Chorus vor Outro
       D = first Outro phrase
     """
-    first_chorus_ms = next(
-        (c['ms'] for c in cues if c['label'] in _HOT_CUE_LABELS_C), None
-    )
-
     slots: dict[int, dict] = {}
 
-    # A: Intro
+    # A: first Intro
     intro = next((c for c in cues if c['label'] in _HOT_CUE_LABELS_A), None)
     if intro:
         slots[1] = {**intro, 'hot_cue': 1}
 
-    # B: last build phrase before first Chorus
-    build = next(
-        (c for c in reversed(cues)
-         if c['label'] in _HOT_CUE_LABELS_B
-         and (first_chorus_ms is None or c['ms'] < first_chorus_ms)),
-        None,
-    )
-    if build:
-        slots[2] = {**build, 'hot_cue': 2}
-
-    # C: first Chorus
-    chorus = next((c for c in cues if c['label'] in _HOT_CUE_LABELS_C), None)
-    if chorus:
-        slots[3] = {**chorus, 'hot_cue': 3}
-
-    # D: Outro
+    # D: first Outro
     outro = next((c for c in cues if c['label'] in _HOT_CUE_LABELS_D), None)
     if outro:
         slots[4] = {**outro, 'hot_cue': 4}
+
+    # B: first Chorus
+    first_chorus = next((c for c in cues if c['label'] in _HOT_CUE_LABELS_C), None)
+    if first_chorus:
+        slots[2] = {**first_chorus, 'hot_cue': 2}
+
+    # C: first Chorus/Down/Bridge ab 45% Songlänge
+    if first_chorus:
+        song_end_ms = outro['ms'] if outro else cues[-1]['ms']
+        cutoff_ms = song_end_ms * _THRESHOLD
+        outro_ms = outro['ms'] if outro else float('inf')
+        post_B = [c for c in cues if c['ms'] > first_chorus['ms'] and c['ms'] < outro_ms]
+
+        # 1. Erster Chorus ab cutoff
+        C = next((c for c in post_B if c['label'] in _HOT_CUE_LABELS_C and c['ms'] >= cutoff_ms), None)
+        # 2. Erster Down/Bridge ab cutoff
+        if C is None:
+            C = next((c for c in post_B if c['label'] in {'Down', 'Bridge'} and c['ms'] >= cutoff_ms), None)
+        # 3. Letzter Chorus vor Outro (Fallback)
+        if C is None:
+            post_B_ch = [c for c in post_B if c['label'] in _HOT_CUE_LABELS_C]
+            C = post_B_ch[-1] if post_B_ch else None
+
+        if C:
+            slots[3] = {**C, 'hot_cue': 3}
 
     return [v for _, v in sorted(slots.items())]
 
