@@ -18,7 +18,7 @@ Optional configuration via environment variables:
   AUTOCUE_LOCAL_ANLZ_BASE
 """
 
-import sys, os, json, struct, re, subprocess, warnings, shutil, random
+import sys, os, json, struct, re, subprocess, warnings, shutil, random, platform
 sys.stdout.reconfigure(encoding='utf-8', errors='replace')
 from pathlib import Path
 from datetime import datetime, timezone
@@ -33,7 +33,15 @@ RB_JS = HERE / 'rb.js'
 
 DEFAULT_DRIVE = os.environ.get('AUTOCUE_REKORDBOX_DRIVE', 'D:\\')
 D_DRIVE = Path(DEFAULT_DRIVE)
-DEFAULT_RB_ROOT = Path(os.environ.get('APPDATA', str(Path.home()))) / 'Pioneer' / 'rekordbox'
+
+def _default_rb_root() -> Path:
+    if 'APPDATA' in os.environ:                  # Windows
+        return Path(os.environ['APPDATA']) / 'Pioneer' / 'rekordbox'
+    if platform.system() == 'Darwin':            # macOS
+        return Path.home() / 'Library' / 'Pioneer' / 'rekordbox'
+    return Path.home() / '.pioneer' / 'rekordbox'  # Linux
+
+DEFAULT_RB_ROOT = _default_rb_root()
 MASTER_DB = Path(os.environ.get('AUTOCUE_MASTER_DB', str(D_DRIVE / 'PIONEER' / 'Master' / 'master.db')))
 
 # Local ANLZ store for tracks not yet exported to the target drive.
@@ -74,8 +82,9 @@ def resolve_audio_path(file_path: str) -> Path | None:
     """Resolve an audio file path, supporting absolute and drive-relative paths."""
     if not file_path:
         return None
-    # Absolute path (for example C:/Music/Track.wav)
-    p = Path(file_path.replace('/', '\\'))
+    # Normalize to OS-native separators only on Windows
+    norm = file_path.replace('/', '\\') if platform.system() == 'Windows' else file_path
+    p = Path(norm)
     if p.is_absolute() and p.exists():
         return p
     # Relative path (for example /Contents/...) -> resolve on the export drive
